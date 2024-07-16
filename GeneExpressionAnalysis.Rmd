@@ -1,0 +1,285 @@
+---
+title: "Gene Expression Analysis"
+author: "Dimitrios Anastasiou"
+date: "14/12/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Bioconductor packages
+
+First we will load the required packages. They are from bioconductor and CRAN.
+
+```{r packages, echo=TRUE,message=FALSE}
+library(tidyverse)
+library(hgu133a.db)
+library(hugene10sttranscriptcluster.db)
+library(AnnotationDbi)
+library(affy)
+library(arrayQualityMetrics)
+library(ggplot2)
+library(limma)
+```
+
+## Data import
+
+We will analyze only the condition of "drug" vs "control" for a pancreatic cell line treated with a BET inhibitor. 
+We have 3 samples/arrays for each condition.
+We have 535824 probes and 6 samples/arrays.
+
+Sample  | State 
+--- | ---
+GSM4512644  | Drug
+GSM4512645  | Drug
+GSM4512646  | Drug
+GSM4512647  | Disease  
+GSM4512648  | Disease
+GSM4512649  | Disease
+
+
+```{r Data import and structure, echo=TRUE, message=FALSE,warning=FALSE}
+pheno <- data.frame(condition = c(rep("treated",
+                                      times =3),rep("control",times=3)))
+
+rownames(pheno) <- list.files(path ="data")
+
+pheno <- AnnotatedDataFrame(pheno)
+
+raw <- ReadAffy(celfile.path = "data",filenames = rownames(pheno),
+                phenoData = pheno)
+raw
+head(raw@assayData$exprs)
+```
+
+# Question 1. Visualize the PCA and Boxplot of the raw data for the 6 samples. Are there any outliers?
+
+## Quality control
+
+We will generate a report of QC plots for data visualization outlier detection.
+No array was considered an outlier
+
+```{r Generate quality control plots, echo = TRUE, eval=FALSE}
+arrayQualityMetrics(raw)
+```
+```{r}
+PCA <- prcomp(t(exprs(raw)), scale. = FALSE)
+percentV <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+SD_ratio <- sqrt(percentV[2] / percentV[1])
+
+dataG <- data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2],
+                     condition = pData(raw)[,1])
+ggplot(dataG,aes(PC1, PC2))+
+  geom_point(aes(colour = condition)) +
+  ggtitle("PCA plot of the raw data") +
+  xlab(paste0("PC1, VarExp: ", percentV[1], "%")) +
+  ylab(paste0("PC2, VarExp: ", percentV[2], "%")) +
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_color_manual(values = c("darkorange2", "dodgerblue4"))
+
+boxplot(raw)
+```
+
+# Question 2. Visualize the PCA and Boxplot of the processed gene expression after using the RMA algorithm. Comment on the plots.
+
+## Preprocessing with RMA
+
+Preprocessing with RMA involves three steps:
+1. Background correction using convolution model
+2. Quantile Normalization
+3. Summarization
+
+After implementing RMA we end up with an expression set. It is an object similar to a list with three slots:
+1.  assayData contains the actual measurements
+2.  phenoData contains data about our samples
+3.  featureData contains data about out features ( = GENES ).
+
+Then we generate the PCA and see that the procedure worked out nicely.
+
+```{r}
+exp_rma <- affy::rma(raw)
+exprs_rma <- exprs(exp_rma)
+head(exprs_rma)
+PCA <- prcomp(t(exprs(exp_rma)), scale. = FALSE)
+percentVar <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+sd_ratio <- sqrt(percentVar[2] / percentVar[1])
+
+dataGG <- data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2],
+                     condition = pData(exp_rma)[,1])
+
+g2 <- ggplot(dataGG, aes(PC1, PC2)) +
+  geom_point(aes(colour = condition)) +
+  geom_text(aes(label= pData(exp_rma)[,1]),hjust=0, vjust=0, size = 3) +
+  ggtitle("PCA plot of the rma expression data") +
+  xlab(paste0("PC1, VarExp: ", percentVar[1], "%")) +
+  ylab(paste0("PC2, VarExp: ", percentVar[2], "%")) +
+  theme(plot.title = element_text(hjust = 0.5))+
+  scale_color_manual(values = c("darkorange2", "dodgerblue4"))
+g2
+boxplot(exprs_rma)
+``` 
+  Comments on the plots:
+1) In the Boxplot, after processing with the RMA algorithm, the distributions are almost identical for the 6 samples.
+2) In the PCA plot, we notice a separation between control, that are clustered on the right side, and treated, that are scattered on the left side.
+
+# Question 3. Which are the 10 most statistically significant overexpressed and underexpressed genes (annotate with Gene Symbols) from the differential expression analysis? (Use a 0.001 pvalue threshold for significance).
+
+## Differential expression with GLMs
+
+```{r , warning=FALSE}
+condition = factor(c(rep("treated", times =3),rep("control",times=3)))
+
+design_matrix <- model.matrix(~condition)
+design_matrix
+
+fit <- lmFit(object = exprs_rma ,design = design_matrix, method = "ls")
+
+fit <- eBayes(fit)
+
+topTable(fit,coef=2,number = 20, genelist = rownames(exprs_rma))[,c(2,5)]
+
+results <- topTable(fit,coef=2,number = nrow(exprs_rma), genelist = rownames(exprs_rma))[,c(2,5)]
+```
+
+```{r}
+results_p <- results %>%
+  filter(P.Value > 0.001) %>%
+  arrange(desc(P.Value))
+  head(results_p,10)            # 10 most statistically significant overexpressed
+  tail(results_p,10)            # 10 most statistically significant underexpressed
+```
+
+# Question 4. Visualize the volcano plot of the differential expression analysis.
+
+```{r}
+volcanoplot(fit,coef=2,highlight=10,names = rownames(exprs_rma))
+```
+
+# Question 5. Identify the top 10 upregulated and downregulated GO terms for biological processes affected by Vorinostat using GSEA. (use a 0.05 threshold for the adjusted p-value)
+
+```{r , warning = FALSE, message=FALSE,include=FALSE}
+library(topGO)
+```
+```{r , warning = FALSE, message=FALSE}
+head(results)
+```
+
+```{r , warning = FALSE,include=FALSE}
+
+results <- results %>%
+  rownames_to_column("PROBEID")
+
+#### filter for differential expression
+DEX <- unique(results$PROBEID[abs(results$logFC)>1.5 & results$P.Value<0.001])
+#### DEX has the probe ids for the differentially expressed genes
+head(DEX)
+```
+
+```{r backgenes ,  warning=FALSE,include=FALSE}
+#### this code creates the back_genes vector, with genes that have similar expression
+#### distribution to our DEX
+back_genes_idx <- genefilter::genefinder(exp_rma,
+                                         as.character(DEX),
+                                         method = "manhattan", scale = "none")
+
+back_genes_idx <- sapply(back_genes_idx, function(x)x$indices)
+
+back_genes <- featureNames(exp_rma)[back_genes_idx]
+
+back_genes <- setdiff(back_genes, DEX)
+length(back_genes)
+##########
+```
+
+```{r allgenes, warning = FALSE,include=FALSE}
+
+gene_IDs <- results$PROBEID
+in_universe <- gene_IDs %in% c(DEX, back_genes)
+in_selection <- gene_IDs %in% DEX
+
+all_genes <- factor(as.integer(in_selection[in_universe]))
+names(all_genes) <- gene_IDs[in_universe]
+
+head(all_genes)
+```
+
+```{r fisher , warning = FALSE,include=FALSE}
+top_GO_data <- new("topGOdata", ontology = "BP", allGenes = all_genes,
+                   nodeSize = 10, annot = annFUN.db, affyLib = "hugene10sttranscriptcluster.db")
+
+
+result_top_GO_classic <-
+  runTest(top_GO_data, algorithm = "classic", statistic = "Fisher")
+
+res_top_GO <- GenTable(top_GO_data,
+                       Fisher.classic = result_top_GO_classic,
+                       orderBy = "Fisher.classic" , topNodes = 100)
+res_top_GO[1:10,]
+```
+
+# GSEA for GO biological process enrichment
+
+First we will annotate the probe ids using gene symbols.
+
+```{r,message=FALSE}
+### Insert this annotation to our feature data of the expressionset, after removing NAs.
+anno <- AnnotationDbi::select(hugene10sttranscriptcluster.db,
+                              keys = (rownames(exp_rma)),
+                              columns = "SYMBOL",
+                              keytype = "PROBEID")
+
+anno <- anno %>% group_by(PROBEID) %>% 
+  summarise(SYMBOL = paste(SYMBOL, collapse = " /// ")) %>% 
+  as.data.frame(.) %>% column_to_rownames("PROBEID")
+
+
+exp_rma@featureData@data <- anno
+
+
+exprs_annotated <- exprs( exp_rma) %>% 
+  aggregate(
+    by = list(exp_rma@featureData@data$SYMBOL), FUN = mean
+  ) %>% 
+  rename_("SYMBOL" = "Group.1") %>% 
+  filter(!grepl("///", SYMBOL)) %>% 
+  column_to_rownames("SYMBOL")
+head(exprs_annotated)
+
+condition = factor(c(rep("control", times =3),rep("treated",times=3)))
+
+design_matrix <- model.matrix(~condition)
+design_matrix
+
+fit <- lmFit(object = exprs_annotated ,design = design_matrix, method = "ls")
+fit <- eBayes(fit)
+results <- topTable(fit,coef=2,number = nrow(exprs_annotated), genelist = rownames(exprs_annotated))[,c(2,5)]
+results <- results %>% rownames_to_column("gene")
+```
+
+```{r,message = FALSE}
+genes <- factor(x = rep(1,nrow(results)),levels = c(0,1))
+names(genes) <- results$gene
+
+GOobject <- new("topGOdata",ontology = "BP", allGenes = genes, annot=annFUN.org, mapping="org.Hs.eg.db", 
+                ID = "symbol", nodeSize = 10)
+
+term.genes <- genesInTerm(GOobject, GOobject@graph@nodes)
+
+library(fgsea)
+genes_fc <- results$logFC
+names(genes_fc) <- results$gene
+results_go <- fgsea(pathways = term.genes,stats = genes_fc,nperm = 1000,minSize = 20,maxSize = 500)
+head(results_go)
+```
+```{r}
+results_reg <- results_go %>%
+  filter(padj > 0.05) %>%
+  arrange(desc(padj))
+  head(results_reg,10)         # Top 10 upregulated GO terms
+  tail(results_reg,10)         # Top 10 downregulated GO terms
+```
